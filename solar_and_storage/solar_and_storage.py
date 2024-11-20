@@ -17,6 +17,7 @@ class SolarAndStorage:
         self,
         prices: List,
         solar_generation: List,
+        consumption: List = None,
         battery_soc_min: float = 0,
         battery_soc_max: float = 1,
         battery_capacity: float = 1,
@@ -30,6 +31,7 @@ class SolarAndStorage:
 
         :param prices: list of prices
         :param solar_generation: list of solar generations
+        :param consumption: (optional) list of consumption values
         :param battery_soc_min: the battery mininum soc
         :param battery_soc_max: the battery maximum soc
         :param battery_capacity: the capacity of the battery [KWh]
@@ -50,7 +52,19 @@ class SolarAndStorage:
 
         # todo set these up as parameters
         self.solar_generation = solar_generation
+        self.consumption = consumption or [0] * len(solar_generation)  # Default to zeros
         self.prices = prices
+
+        # Validate that the input lengths match
+        if len(self.prices) != len(self.solar_generation):
+            raise ValueError("'prices' and 'solar_generation' must have the same length.")
+        if len(self.solar_generation) != len(self.consumption):
+            raise ValueError("'solar_generation' and 'consumption' must have the same length.")
+        # Calculate net generation
+        self.net_generation = [
+            sg - c for sg, c in zip(self.solar_generation, self.consumption)
+        ]
+        #print (self.net_generation)
 
         # ## Setup Variables #####
         # the amount of power going into the battery
@@ -73,7 +87,7 @@ class SolarAndStorage:
             self.power_discharge_cp_variable - self.battery_power_charge_cp_variable
         )
         # Maximise the solar revenue
-        objectives += prices_matrix @ (solar_generation - self.power_solar_to_battery)
+        objectives += prices_matrix @ (self.net_generation - self.power_solar_to_battery)
 
         objective_function = cp.Maximize(objectives)
 
@@ -106,8 +120,7 @@ class SolarAndStorage:
             ]
 
             # solar to battery
-            constraints += [0 <= self.power_solar_to_battery[i]]
-            constraints += [self.power_solar_to_battery[i] <= solar_generation[i]]
+            constraints += [self.power_solar_to_battery[i] <= max(0, self.net_generation[i])]
             constraints += [
                 self.power_solar_to_battery[i] + self.battery_power_charge_cp_variable[i]
                 <= self.power_rating * self.charging_cp_variable[i]
@@ -115,7 +128,7 @@ class SolarAndStorage:
 
             # grid constraints
             constraints += [
-                solar_generation[i] + self.power_discharge_cp_variable[i]
+                self.net_generation[i] + self.power_discharge_cp_variable[i]
                 <= self.grid_connection_capacity
             ]
 
@@ -145,6 +158,7 @@ class SolarAndStorage:
 
     def get_results(self) -> pd.DataFrame:
         """Get optimization results (after running)"""
+        # we should check self.prob.status
         # run plot resutls
         power = np.round(
             self.battery_power_charge_cp_variable.value - self.power_discharge_cp_variable.value, 2
@@ -153,7 +167,7 @@ class SolarAndStorage:
         profit = self.prices * (
             self.power_discharge_cp_variable.value - self.battery_power_charge_cp_variable.value
         )
-        solar_power_to_grid = self.solar_generation - self.power_solar_to_battery.value
+        solar_power_to_grid = self.net_generation - self.power_solar_to_battery.value
 
         data = np.array([power, e_soc[:HOURS_PER_DAY], solar_power_to_grid, profit]).transpose()
 
@@ -171,11 +185,12 @@ class SolarAndStorage:
         solar_power_to_grid = result_df["solar_power_to_grid"]
 
         # plot
-        fig = make_subplots(rows=3, cols=1, subplot_titles=["Solar profile", "Price", "SOC"])
+        fig = make_subplots(rows=4, cols=1, subplot_titles=["Solar profile", "Price", "SOC", "consumption"])
         fig.add_trace(go.Scatter(y=e_soc[:24], name="SOC"), row=3, col=1)
-        fig.add_trace(go.Scatter(y=self.solar_generation, name="solar", line_shape="hv"), row=1, col=1)
+        fig.add_trace(go.Scatter(y=self.net_generation, name="net generation (solar - consumption)", line_shape="hv"), row=1, col=1)
+        fig.add_trace(go.Scatter(y=self.consumption, name="consumption)", line_shape="hv"), row=4, col=1)
         fig.add_trace(
-            go.Scatter(y=solar_power_to_grid, name="solar to gird", line_shape="hv"), row=1, col=1
+            go.Scatter(y=solar_power_to_grid, name="solar + storage to gird", line_shape="hv"), row=1, col=1
         )
         fig.add_trace(go.Scatter(y=self.prices, name="price", line_shape="hv"), row=2, col=1)
 
